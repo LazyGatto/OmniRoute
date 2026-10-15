@@ -197,7 +197,12 @@ export const MAX_PREVIEW_ARRAY_ITEMS = 12;
 export const MAX_PREVIEW_OBJECT_KEYS = 24;
 
 function truncatePreviewString(value: string): string {
-  return value.length > MAX_PREVIEW_STRING ? `${value.slice(0, MAX_PREVIEW_STRING)}...` : value;
+  if (value.length <= MAX_PREVIEW_STRING) return value;
+  // Detach the preview from its source. A bare String#slice() returns a V8
+  // SlicedString that keeps the whole parent string alive, so the pending pool
+  // would retain full multi-megabyte request bodies while only accounting for
+  // the visible preview.
+  return Buffer.from(`${value.slice(0, MAX_PREVIEW_STRING)}...`, "utf8").toString("utf8");
 }
 
 function previewTree(value: unknown, depth: number, cutStrings: boolean): unknown {

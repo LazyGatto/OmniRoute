@@ -168,7 +168,12 @@ function truncateLogString(value: string, maxLength = MAX_LOG_STRING_LENGTH): st
   // bounded string truncated it a second time and the function was not idempotent.
   const marker = `\n[...truncated ${value.length - maxLength} chars...]\n`;
   const keep = Math.max(0, maxLength - marker.length);
-  return `${value.slice(0, Math.floor(keep / 2))}${marker}${value.slice(-Math.ceil(keep / 2))}`;
+  const head = value.slice(0, Math.floor(keep / 2));
+  const tail = value.slice(-Math.ceil(keep / 2));
+  // Flatten the bounded string before it is retained anywhere (call-log details,
+  // previews): String#slice() returns a V8 SlicedString whose parent is the whole
+  // source, so a 64 KB preview would keep a multi-megabyte request body alive.
+  return Buffer.from(`${head}${marker}${tail}`, "utf8").toString("utf8");
 }
 
 /**
