@@ -68,7 +68,9 @@ import {
   parseDetailedRetryHintFromJsonBody,
   parseDelayString,
   MAX_SHORT_RETRY_HINT_MS,
+  hasGoogleDailyQuotaViolation,
 } from "./retryAfterJson.ts";
+import { googleDailyQuotaCooldownMs } from "./googleDailyQuota.ts";
 import { isMoonshotAccountBalanceExhausted } from "./usage/moonshotOpenPlatform.ts";
 import { isTpdRateLimit, resolveTpdCooldownMs, nextConfiguredResetMs } from "./dailyQuotaReset.ts";
 
@@ -1385,6 +1387,8 @@ export function parseRetryFromErrorText(
 ): number | null {
   if (!errorText || typeof errorText !== "string") return null;
   const msg: string = String(errorText);
+  // A Google PerDay quota violation outlives its seconds-scale RetryInfo.
+  if (hasGoogleDailyQuotaViolation(msg)) return googleDailyQuotaCooldownMs({ nowMs });
 
   const bodyHintMs = parseRetryHintFromJsonBody(msg, MAX_PROVIDER_COOLDOWN_MS);
   if (bodyHintMs !== null) return bodyHintMs;
@@ -1881,6 +1885,21 @@ export function checkFallbackError(
         cooldownMs: COOLDOWN_MS.paymentRequired ?? 3600 * 1000, // 1h cooldown
         reason: RateLimitReason.QUOTA_EXHAUSTED,
         creditsExhausted: true,
+      };
+    }
+
+    // Google QuotaFailure naming a PerDay quotaId: daily exhaustion, not a throttle. Its
+    // RetryInfo (~20s) would re-burn the key every rotation until the daily reset, so park
+    // until then. Body-shaped (gemini/vertex/AI Studio alike); per-model providers turn
+    // quotaResetHintMs into a model lockout, still bounded by the operator's cap.
+    if (status === HTTP_STATUS.RATE_LIMITED && hasGoogleDailyQuotaViolation(errorStr)) {
+      const cooldownMs = googleDailyQuotaCooldownMs(dailyReset);
+      return {
+        shouldFallback: true,
+        cooldownMs,
+        reason: RateLimitReason.QUOTA_EXHAUSTED,
+        dailyQuotaExhausted: true,
+        quotaResetHintMs: cooldownMs,
       };
     }
 

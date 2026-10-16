@@ -168,6 +168,7 @@ const SAFE_PUBLIC_ERROR_IDENTIFIERS = new Set([
   "invalid_trailer",
   "key_allows_all_combos",
   "key_allows_all_models",
+  "kiro_tool_call_repair_retry_failed",
   "lease_action_invalid",
   "lease_api_key_invalid",
   "lease_authentication_required",
@@ -537,8 +538,7 @@ export function sanitizeRecoveryHint(
   if (!r || typeof r !== "object") return undefined;
   const action = typeof r.action === "string" ? (r.action as ComboRecoveryAction) : null;
   if (!action || !RECOVERY_ACTIONS.has(action)) return undefined;
-  // Reject empty OR whitespace-only next_step — the value must render usefully as a
-  // header and as a body field. A whitespace-only string would print as a blank hint.
+  // Reject empty/whitespace-only next_step: it must render as a non-blank header + body hint.
   const next_step = clampRecoveryStr(r.next_step, 200).trim();
   if (!next_step) return undefined;
   const hint: ComboRecoveryHint = { action, next_step };

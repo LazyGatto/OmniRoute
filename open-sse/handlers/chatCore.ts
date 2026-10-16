@@ -1,4 +1,3 @@
-import { learnCopilotModelRejection } from "../services/copilotModelRejections.ts";
 import {
   extractRequestToolMetadata,
   resolveResponseToolNameMap,
@@ -113,6 +112,7 @@ import { FORMATS } from "../translator/formats.ts";
 import { collectCustomToolNamesForSourceFormat } from "../translator/request/openai-responses/additionalTools.ts";
 import { sanitizeKiroTools } from "../utils/kiroSanitizer.ts";
 import { splitMisplacedToolResults } from "../translator/helpers/claudeHelper.ts";
+import { hoistDeferredToolsForTarget } from "../translator/helpers/claudeDeferredTools.ts";
 import { ensureCacheControlOnLastUserMessage } from "../services/claudeCodeConstraints.ts";
 import { THINKING_MARKER_HEADER } from "../utils/thinkCloseMarker.ts";
 import { resolveAgentGoalPolicy } from "../utils/agentGoalPolicy.ts";
@@ -326,7 +326,6 @@ import {
 import { setGeminiThoughtSignatureMode } from "../services/geminiThoughtSignatureStore.ts";
 import { classifyModelScope429, isModelScopeProvider } from "../services/modelscopePolicy.ts";
 import { incrementTokenUsage, isTpmExhausted } from "../services/geminiRateLimitTracker.ts";
-import { getProactiveCompressionRatio } from "@/lib/db/compression";
 
 /**
  * #12150 P1b: shape of handleChatCore's optional `videoBridgeLog` param — see
@@ -2009,7 +2008,9 @@ async function handleChatCoreInner({
       }
     }
 
-    const COMPRESSION_THRESHOLD = getProactiveCompressionRatio();
+    const COMPRESSION_THRESHOLD = (
+      await import("@/lib/db/compression")
+    ).getProactiveCompressionRatio();
     let reservedTokens = 0;
     if (Array.isArray(body.tools)) {
       reservedTokens = estimateTokens(body.tools);
@@ -2381,7 +2382,16 @@ async function handleChatCoreInner({
       // payloads at high context (150+ msgs, 100+ tools). Fix: #1359.
       // Claude Code sends well-formed Messages API payloads — trust them
       // regardless of combo strategy or cache_control settings.
-      translatedBody = applyReasoningRuleDirective({ ...body }, "claude");
+      // applyReasoningRuleDirective returns unknown; the hoist helper requires a record.
+      const claudePassthroughBody = applyReasoningRuleDirective({ ...body }, "claude");
+      translatedBody = hoistDeferredToolsForTarget(
+        claudePassthroughBody !== null &&
+          typeof claudePassthroughBody === "object" &&
+          !Array.isArray(claudePassthroughBody)
+          ? (claudePassthroughBody as Record<string, unknown>)
+          : { ...(body as Record<string, unknown>) },
+        provider
+      );
       translatedBody._disableToolPrefix = true;
 
       // Sanitize historical thinking-block signatures for Anthropic-native Claude OAuth.
@@ -3577,6 +3587,9 @@ async function handleChatCoreInner({
           const notFoundCooldownMs = COOLDOWN_MS.notFound;
           if (!(await shouldIsolateProbeFailures())) {
             const modelToLock = targetModel || model;
+            const { learnCopilotModelRejection } = await import(
+              "../services/copilotModelRejections.ts"
+            );
             if (!learnCopilotModelRejection(statusCode, provider, errorConnectionId, modelToLock, upstreamErrorBody)) {
               lockModel(provider, errorConnectionId, modelToLock, "model_not_found", notFoundCooldownMs);
               console.warn(

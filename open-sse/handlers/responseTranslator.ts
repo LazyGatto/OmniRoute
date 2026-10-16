@@ -561,7 +561,8 @@ export function translateNonStreamingResponse(
         result.usage = {
           prompt_tokens: promptTokens,
           completion_tokens: completionTokens,
-          total_tokens: toNumber(usage.totalTokenCount, 0),
+          // Gemini may omit totalTokenCount; derive it instead of reporting 0.
+          total_tokens: toNumber(usage.totalTokenCount, 0) || promptTokens + completionTokens,
         };
         if (reasoningTokens > 0) {
           (result.usage as JsonRecord).completion_tokens_details = {

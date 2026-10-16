@@ -9963,9 +9963,37 @@ paths:
       tags:
         - Db backups
       summary: "POST db backups › import"
+      description: >-
+        Replaces the live database with an uploaded `.sqlite` backup (multipart `file` field,
+        or the raw bytes with `?filename=`). The upload is checked for SQLite integrity and the
+        required OmniRoute tables first. Accepts the dashboard session, a `manage`-scoped API
+        key, or the local CLI credential.
+      parameters:
+        - name: dryRun
+          in: query
+          description: >-
+            `true` validates the upload and returns what would be imported (row counts, schema
+            version) without the pre-import backup and without touching the live database. A
+            multipart `dryRun` form field is honoured too.
+          required: false
+          schema:
+            type: string
+            enum: ["true", "false", "1", "0"]
+        - name: filename
+          in: query
+          description: Name of the uploaded file for raw-byte uploads; must end in `.sqlite`.
+          required: false
+          schema:
+            type: string
       responses:
         "200":
-          description: OK
+          description: >-
+            Imported (`imported: true`), or, for a dry run, validated (`dryRun: true,
+            valid: true, imported: false`) with the counts the upload would load.
+        "400":
+          description: Not a valid OmniRoute SQLite backup (type, size, integrity or tables).
+        "401":
+          description: No accepted credential.
   /api/db/health:
     get:
       tags:

@@ -1,6 +1,7 @@
 import { register } from "../registry.ts";
 import { FORMATS } from "../formats.ts";
 import { adjustMaxTokens } from "../helpers/maxTokensHelper.ts";
+import { chatStrictFrom } from "../helpers/toolStrict.ts";
 
 type JsonRecord = Record<string, unknown>;
 const TOOL_CHOICE_ANY = ["a", "n", "y"].join("");
@@ -268,8 +269,9 @@ export function claudeToOpenAIRequest(model, body, stream, credentials: unknown 
             name,
             description: typeof record.description === "string" ? record.description : "", // fix: never null (#276)
             parameters: normalizeToolSchema(record.input_schema),
-            // Preserve tool-level strict schema enforcement (9router#4172).
-            ...(record.strict === true ? { strict: true } : {}),
+            // Preserve tool-level strict schema enforcement (9router#4172). Only booleans
+            // carry over; omitted stays omitted (non-strict on Chat).
+            ...chatStrictFrom(record),
           },
         };
       })

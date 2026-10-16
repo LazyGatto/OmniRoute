@@ -41,14 +41,23 @@ export async function resolveOperatorCredential(
   if (options.allowInternalService && isTrustedLoopbackInternalServiceRequest(request)) {
     return "internal_service";
   }
+  if (await isLocalCliCredential(request)) return "local_cli";
+  return null;
+}
+
+/**
+ * Is the caller the machine-bound local CLI? Either the authz pipeline already validated
+ * the loopback CLI token and stamped the subject, or (raw callers that skip the pipeline)
+ * the token is validated here, loopback-only.
+ */
+export async function isLocalCliCredential(request: Request): Promise<boolean> {
   if (
     request.headers.get(AUTHZ_HEADER_AUTH_KIND) === "management_key" &&
     request.headers.get(AUTHZ_HEADER_AUTH_LABEL) === "local-cli-token"
   ) {
-    return "local_cli";
+    return true;
   }
-  if (await isCliTokenAuthValid(request)) return "local_cli";
-  return null;
+  return isCliTokenAuthValid(request);
 }
 
 export type OperatorAuthVerdict =

@@ -24,6 +24,7 @@ import {
   isOpenAICompatibleProvider,
   isAnthropicCompatibleProvider,
   providerAllowsOptionalApiKey,
+  NOAUTH_PROVIDERS,
   resolveProviderId,
 } from "@/shared/constants/providers";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
@@ -238,11 +239,15 @@ export async function POST(request: Request) {
       );
     }
 
-    // Business validation
+    // Business validation. Own-property only: `in` is also true for Object.prototype
+    // keys ("toString", "constructor"), which are not catalogued providers.
+    const isNoAuthProvider =
+      typeof provider === "string" && Object.hasOwn(NOAUTH_PROVIDERS, provider);
     const isValidProvider =
       isManagedProviderConnectionId(provider) ||
       isOpenAICompatibleProvider(provider) ||
-      isAnthropicCompatibleProvider(provider);
+      isAnthropicCompatibleProvider(provider) ||
+      isNoAuthProvider;
 
     if (!isValidProvider) {
       return NextResponse.json({ error: "Invalid provider" }, { status: 400 });

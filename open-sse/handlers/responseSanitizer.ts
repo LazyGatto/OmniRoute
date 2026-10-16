@@ -481,6 +481,11 @@ function sanitizeUsage(usage: unknown): unknown {
     }
   }
   applyCacheHitTokensToUsage(usageRecord, sanitized); // DeepSeek/MiniMax/Bedrock cache-hit passthrough (#8171)
+  // OpenRouter's provider-billed USD cost: keep it only as a finite bare number.
+  const reportedCost = usageRecord.cost;
+  if (typeof reportedCost === "number" && Number.isFinite(reportedCost) && reportedCost >= 0) {
+    sanitized.cost = reportedCost;
+  }
   // Ensure required fields
   const promptTokens = toNumber(sanitized.prompt_tokens) ?? 0;
   const completionTokens = toNumber(sanitized.completion_tokens) ?? 0;

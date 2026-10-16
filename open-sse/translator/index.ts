@@ -35,6 +35,7 @@ import { getResolvedModelCapabilities, supportsReasoning } from "../services/mod
 import { normalizeRoles } from "../services/roleNormalizer.ts";
 import { hoistLeadingSystemMessage } from "./helpers/strictSystemHoist.ts";
 import { ensurePoeUserTurnHasText } from "./helpers/poeImageOnlyUserTurn.ts";
+import { acceptsInlineToolAdditions, hoistToolAdditions } from "./helpers/claudeDeferredTools.ts";
 import {
   buildAssistantMessageCacheKey,
   lookupReasoning,
@@ -367,7 +368,15 @@ export function translateRequest(
     copilotClient?: boolean;
   }
 ) {
-  let result = normalizeReasoningRequest(body, provider);
+  // Claude Code inline-tools `tool_addition` blocks only reach Anthropic-native targets;
+  // everywhere else their definitions move into tools[] (copy-on-write).
+  const hoistDeferredTools =
+    sourceFormat === FORMATS.CLAUDE &&
+    !(targetFormat === FORMATS.CLAUDE && acceptsInlineToolAdditions(provider));
+  let result = normalizeReasoningRequest(
+    hoistDeferredTools ? hoistToolAdditions(body) : body,
+    provider
+  );
   const use9CharId = options?.normalizeToolCallId === true;
   const preserveDeveloperRole = options?.preserveDeveloperRole;
   const connectionCacheOverride = resolveConnectionCacheOverride(

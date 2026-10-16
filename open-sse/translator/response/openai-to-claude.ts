@@ -321,6 +321,11 @@ function readUsageCounters(usage) {
       promptDetails?.cache_creation_tokens ?? inputDetails?.cache_creation_tokens
     ),
     writeInPrompt: (promptDetails ?? inputDetails)?.cache_creation_in_prompt !== false,
+    reasoningTokens: firstNumber(
+      usage.completion_tokens_details?.reasoning_tokens ??
+        usage.output_tokens_details?.reasoning_tokens ??
+        usage.reasoning_tokens
+    ),
   };
 }
 
@@ -328,8 +333,14 @@ function readUsageCounters(usage) {
 // usage-only chunks that carry `choices: []` (#11817).
 function trackUsageFromChunk(chunk, state) {
   if (!chunk.usage || typeof chunk.usage !== "object") return;
-  const { promptTokens, outputTokens, cacheReadTokens, cacheCreateTokens, writeInPrompt } =
-    readUsageCounters(chunk.usage);
+  const {
+    promptTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheCreateTokens,
+    writeInPrompt,
+    reasoningTokens,
+  } = readUsageCounters(chunk.usage);
 
   // #2215 reports cache creation outside prompt_tokens.
   const inputTokens = Math.max(
@@ -352,8 +363,22 @@ function trackUsageFromChunk(chunk, state) {
     state.usage.cache_creation_input_tokens = cacheCreateTokens;
   }
 
-  // Note: completion_tokens_details.reasoning_tokens is already included in output_tokens
-  // No need to add separately as Claude expects total output_tokens
+  // Reasoning is already included in output_tokens — never add it on top. Keep the
+  // count on the shared state so streaming usage accounting (tokens_reasoning) does
+  // not lose it on this pivot; message_delta strips it from the client payload.
+  if (reasoningTokens > 0) {
+    state.usage.reasoning_tokens = reasoningTokens;
+  }
+}
+
+// Client-facing Claude usage: the accounting-only reasoning_tokens is not part of
+// the Anthropic usage shape.
+function toClaudeClientUsage(usage) {
+  if (!usage) return { input_tokens: 0, output_tokens: 0 };
+  if (usage.reasoning_tokens === undefined) return usage;
+  const clientUsage = { ...usage };
+  delete clientUsage.reasoning_tokens;
+  return clientUsage;
 }
 
 // Convert OpenAI stream chunk to Claude format
@@ -879,7 +904,7 @@ export function openaiToClaudeResponse(chunk, state) {
     state.finishReason = overrideFinishReason;
 
     // Use tracked usage (will be estimated in stream.js if not valid)
-    const finalUsage = state.usage || { input_tokens: 0, output_tokens: 0 };
+    const finalUsage = toClaudeClientUsage(state.usage);
     results.push({
       type: "message_delta",
       delta: { stop_reason: convertFinishReason(overrideFinishReason) },
