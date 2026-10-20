@@ -283,6 +283,9 @@ export function createPreparedRequestLogger(
   let latest: ProviderRequestPrepared | null = null;
   return {
     capture(request) {
+      // Async resources can retain an old dispatch's ALS store after release.
+      // Ignore that late work without disabling this capture for a fresh retry.
+      if (dispatchContext.getStore()?.settled) return;
       latest = request;
       reqLogger.logTargetRequest(request.url, request.headers, request.body);
       updatePendingScope(scope, {
