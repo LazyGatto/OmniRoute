@@ -13,6 +13,14 @@ export type Capture = {
   capture: (request: ProviderRequestPrepared) => Promise<void> | void;
   body: (fallback: unknown) => unknown;
   latest?: () => ProviderRequestPrepared | null;
+  /**
+   * Drop the retained request body once the dispatch it belongs to has settled.
+   * The Capture is stored in AsyncLocalStorage, so sockets/streams created
+   * during the dispatch keep the store alive long afterwards; without a release
+   * the full (multi-megabyte) `latest` bodyString stays reachable for the
+   * lifetime of those resources and the heap grows request after request.
+   */
+  release?: () => void;
 };
 
 type RequestLoggerLike = {
@@ -164,6 +172,10 @@ export function runWithCapture<T>(requestCapture: Capture, fn: () => Promise<T>)
     for (const listener of getDispatchStartListeners()) listener();
     return captureState.context.run(requestCapture, fn).finally(() => {
       dispatch.settled = true;
+      // Free the captured request body as soon as the dispatch is over: the
+      // async resources that outlive the call (sockets, streams) would
+      // otherwise pin it through the ALS store (heap leak, ~80 MB/h in prod).
+      requestCapture.release?.();
     });
   });
 }
@@ -313,6 +325,9 @@ export function createPreparedRequestLogger(
     },
     latest() {
       return latest;
+    },
+    release() {
+      latest = null;
     },
   };
 }
