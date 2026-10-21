@@ -9,6 +9,16 @@ import {
   runWithCapture,
 } from "../../open-sse/utils/providerRequestLogging.ts";
 
+const CAPTURE_STATE_KEY = Symbol.for("omniroute.providerRequestCapture.state");
+
+// The AsyncLocalStorage store a dispatch (and any async resource created in it) holds on to.
+function dispatchStore(): { capture: unknown } | undefined {
+  const state = (globalThis as Record<symbol, unknown>)[CAPTURE_STATE_KEY] as {
+    context: { getStore: () => { capture: unknown } | undefined };
+  };
+  return state.context.getStore();
+}
+
 function makeCapture() {
   return createPreparedRequestLogger(
     { logTargetRequest() {} },
@@ -16,42 +26,75 @@ function makeCapture() {
   );
 }
 
-test("settling a dispatch releases its prepared body and returns the caller's fallback", async () => {
+test("after a dispatch settles chatCore can still read the wire body, but the ALS store no longer holds the Capture", async () => {
   const capture = makeCapture();
   const fallback = { model: "fallback", messages: [] };
   const upstream = { model: "serialized", messages: [{ role: "user", content: "payload" }] };
-  const result = await runWithCapture(capture, async () => {
-    await captureCurrentProviderBody(
-      "https://synthetic.invalid/chat",
-      {},
-      JSON.stringify(upstream)
-    );
+  let resource: AsyncResource | undefined;
+  try {
+    const result = await runWithCapture(capture, async () => {
+      await captureCurrentProviderBody(
+        "https://synthetic.invalid/chat",
+        {},
+        JSON.stringify(upstream)
+      );
+      assert.deepEqual(capture.body(fallback), upstream);
+      assert.ok(capture.latest?.());
+      assert.equal(
+        dispatchStore()?.capture,
+        capture,
+        "the live dispatch store carries the capture"
+      );
+      resource = new AsyncResource("synthetic-provider-socket");
+      return "dispatch-result";
+    });
+    assert.equal(result, "dispatch-result");
+
+    // Readers in chatCore run after runWithCapture settled: the exact wire body must survive
+    // (signature-failure diagnostics via getLastOutboundBody, call-log request body).
+    assert.deepEqual(capture.latest?.()?.body, upstream);
+    assert.equal(capture.latest?.()?.url, "https://synthetic.invalid/chat");
     assert.deepEqual(capture.body(fallback), upstream);
-    assert.ok(capture.latest?.());
-    return "dispatch-result";
-  });
-  assert.equal(result, "dispatch-result");
-  assert.equal(capture.latest?.(), null);
-  assert.equal(capture.body(fallback), fallback);
+
+    // ...while whatever async resource outlived the dispatch no longer reaches the Capture.
+    assert.ok(resource);
+    resource.runInAsyncScope(() => {
+      const store = dispatchStore();
+      assert.ok(store, "the resource still sees its (now empty) holder");
+      assert.equal(store.capture, null);
+    });
+  } finally {
+    resource?.emitDestroy();
+  }
 });
 
-test("a rejected dispatch releases its body without replacing the original error", async () => {
+test("a rejected dispatch detaches the capture, keeps the body readable and rethrows the original error", async () => {
   const capture = makeCapture();
   const failure = new Error("synthetic dispatch failure");
-  await assert.rejects(
-    runWithCapture(capture, async () => {
-      await captureCurrentProviderBody("https://synthetic.invalid/chat", {}, '{"model":"failed"}');
-      assert.ok(capture.latest?.());
-      throw failure;
-    }),
-    (error) => error === failure
-  );
-  assert.equal(capture.latest?.(), null);
-  const fallback = { model: "caller-body" };
-  assert.equal(capture.body(fallback), fallback);
+  let resource: AsyncResource | undefined;
+  try {
+    await assert.rejects(
+      runWithCapture(capture, async () => {
+        await captureCurrentProviderBody(
+          "https://synthetic.invalid/chat",
+          {},
+          '{"model":"failed"}'
+        );
+        assert.ok(capture.latest?.());
+        resource = new AsyncResource("synthetic-provider-socket");
+        throw failure;
+      }),
+      (error) => error === failure
+    );
+    assert.deepEqual(capture.latest?.()?.body, { model: "failed" });
+    assert.deepEqual(capture.body({ model: "caller-body" }), { model: "failed" });
+    resource?.runInAsyncScope(() => assert.equal(dispatchStore()?.capture, null));
+  } finally {
+    resource?.emitDestroy();
+  }
 });
 
-test("tool-name metadata survives both captured-body and post-settlement fallback access", async () => {
+test("tool-name metadata survives both during and after the dispatch", async () => {
   const capture = makeCapture();
   const names = new Map([["WorkspaceRead", "workspace_read"]]);
   const fallback = { model: "fallback" };
@@ -65,12 +108,13 @@ test("tool-name metadata survives both captured-body and post-settlement fallbac
     assert.doesNotMatch(JSON.stringify(body), /_toolNameMap/);
   });
   const body = capture.body(fallback) as Record<string, unknown>;
-  assert.equal(body, fallback);
+  assert.equal(body.model, "upstream");
   assert.equal(body._toolNameMap, names);
+  assert.equal(Object.getOwnPropertyDescriptor(body, "_toolNameMap")?.enumerable, false);
   assert.doesNotMatch(JSON.stringify(body), /_toolNameMap/);
 });
 
-test("an async resource from a settled dispatch cannot retain a new body or overwrite a retry", async () => {
+test("an async resource from a settled dispatch cannot capture anything or overwrite a retry", async () => {
   const capture = makeCapture();
   let resource: AsyncResource | undefined;
   try {
@@ -83,12 +127,21 @@ test("an async resource from a settled dispatch cannot retain a new body or over
       assert.equal(isProviderRequestCaptureActive(), false);
       await captureCurrentProviderBody("https://synthetic.invalid/late", {}, '{"model":"late"}');
     });
-    assert.equal(capture.latest?.(), null, "late ALS work must not repin the released body");
+    assert.deepEqual(
+      capture.latest?.()?.body,
+      { model: "first" },
+      "late ALS work must not replace the captured body"
+    );
 
     await runWithCapture(capture, async () => {
       assert.equal(isProviderRequestCaptureActive(), true);
       await captureCurrentProviderBody("https://synthetic.invalid/retry", {}, '{"model":"retry"}');
       assert.deepEqual(capture.body(null), { model: "retry" });
+      // Through the ALS path (holder already emptied)...
+      await resource.runInAsyncScope(() =>
+        captureCurrentProviderBody("https://synthetic.invalid/stale", {}, '{"model":"stale"}')
+      );
+      // ...and by calling the same Capture directly from the old resource's scope.
       await resource.runInAsyncScope(() =>
         capture.capture({
           url: "https://synthetic.invalid/old-resource",
@@ -99,7 +152,7 @@ test("an async resource from a settled dispatch cannot retain a new body or over
       );
       assert.deepEqual(capture.body(null), { model: "retry" });
     });
-    assert.equal(capture.latest?.(), null);
+    assert.deepEqual(capture.latest?.()?.body, { model: "retry" });
   } finally {
     resource?.emitDestroy();
   }

@@ -13,14 +13,6 @@ export type Capture = {
   capture: (request: ProviderRequestPrepared) => Promise<void> | void;
   body: (fallback: unknown) => unknown;
   latest?: () => ProviderRequestPrepared | null;
-  /**
-   * Drop the retained request body once the dispatch it belongs to has settled.
-   * The Capture is stored in AsyncLocalStorage, so sockets/streams created
-   * during the dispatch keep the store alive long afterwards; without a release
-   * the full (multi-megabyte) `latest` bodyString stays reachable for the
-   * lifetime of those resources and the heap grows request after request.
-   */
-  release?: () => void;
 };
 
 type RequestLoggerLike = {
@@ -34,8 +26,17 @@ type WarnLog = {
 type FetchInput = Parameters<typeof fetch>[0];
 type FetchInit = Parameters<typeof fetch>[1];
 
+/**
+ * What AsyncLocalStorage holds for a dispatch. Sockets and streams created during the
+ * dispatch keep the ALS store alive long after it settles, so the store must not
+ * reference the Capture (and its multi-megabyte `latest` request body) directly: the
+ * holder is emptied when the dispatch settles, while chatCore keeps the Capture itself
+ * through its own closure and can still read `latest()`/`body()` after the dispatch.
+ */
+type CaptureHolder = { capture: Capture | null };
+
 type CaptureState = {
-  context: AsyncLocalStorage<Capture>;
+  context: AsyncLocalStorage<CaptureHolder>;
   wrappedFetch: typeof fetch | null;
   wrappedInnerFetch: typeof fetch | null;
 };
@@ -49,7 +50,7 @@ function getCaptureState(): CaptureState {
 
   if (!scopedGlobal[CAPTURE_STATE_KEY]) {
     scopedGlobal[CAPTURE_STATE_KEY] = {
-      context: new AsyncLocalStorage<Capture>(),
+      context: new AsyncLocalStorage<CaptureHolder>(),
       wrappedFetch: null,
       wrappedInnerFetch: null,
     };
@@ -116,7 +117,7 @@ export function captureCurrentProviderRequest(
   log?: WarnLog | null
 ) {
   return capturePreparedRequest(
-    captureState.context.getStore(),
+    captureState.context.getStore()?.capture,
     url,
     headers,
     body,
@@ -170,12 +171,14 @@ export function runWithCapture<T>(requestCapture: Capture, fn: () => Promise<T>)
   const dispatch = { settled: false };
   return dispatchContext.run(dispatch, () => {
     for (const listener of getDispatchStartListeners()) listener();
-    return captureState.context.run(requestCapture, fn).finally(() => {
+    const holder: CaptureHolder = { capture: requestCapture };
+    return captureState.context.run(holder, fn).finally(() => {
       dispatch.settled = true;
-      // Free the captured request body as soon as the dispatch is over: the
-      // async resources that outlive the call (sockets, streams) would
-      // otherwise pin it through the ALS store (heap leak, ~80 MB/h in prod).
-      requestCapture.release?.();
+      // Detach the Capture from the ALS store as soon as the dispatch is over: the
+      // async resources that outlive the call (sockets, streams) would otherwise pin
+      // it, and its captured request body, through the store (heap leak, ~80 MB/h in
+      // prod). Late work from those resources now finds no capture at all.
+      holder.capture = null;
     });
   });
 }
@@ -195,7 +198,7 @@ function installFetchCapture() {
 
   captureState.wrappedInnerFetch = globalThis.fetch.bind(globalThis);
   captureState.wrappedFetch = (async (input: FetchInput, init?: FetchInit) => {
-    const activeCapture = captureState.context.getStore();
+    const activeCapture = captureState.context.getStore()?.capture;
     if (activeCapture) {
       await captureFetchRequest(activeCapture, input, init);
     }
@@ -283,8 +286,9 @@ export function createPreparedRequestLogger(
   let latest: ProviderRequestPrepared | null = null;
   return {
     capture(request) {
-      // Async resources can retain an old dispatch's ALS store after release.
-      // Ignore that late work without disabling this capture for a fresh retry.
+      // Defense in depth: the ALS holder is already emptied when a dispatch settles, but
+      // a direct call from a settled dispatch's async resource must not overwrite the
+      // body of a fresh retry on this same Capture.
       if (dispatchContext.getStore()?.settled) return;
       latest = request;
       reqLogger.logTargetRequest(request.url, request.headers, request.body);
@@ -328,9 +332,6 @@ export function createPreparedRequestLogger(
     },
     latest() {
       return latest;
-    },
-    release() {
-      latest = null;
     },
   };
 }
